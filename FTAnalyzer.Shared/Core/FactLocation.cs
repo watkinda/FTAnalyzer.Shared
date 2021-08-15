@@ -17,7 +17,7 @@ namespace FTAnalyzer
   public class FactLocation : IComparable<FactLocation>, IComparable, IDisplayLocation, IDisplayGeocodedLocation
   {
     #region Variables
-    // static log4net.ILog log = log4net.LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+
     public const int UNKNOWN = -1, COUNTRY = 0, REGION = 1, SUBREGION = 2, ADDRESS = 3, PLACE = 4;
     public enum Geocode
     {
@@ -27,21 +27,34 @@ namespace FTAnalyzer
 
     public string OriginalText { get; private set; }
     public string GEDCOMLocation => FTAnalyzerCreated ? string.Empty : OriginalText;
-    public string SortableLocation { get; private set; }
     public string Country { get; set; }
     public string Region { get; set; }
     public string SubRegion { get; set; }
-    public string Address { get => Address1; set { Address1 = value; AddressNoNumerics = FixNumerics(value ?? string.Empty, false); } }
-    public string Place { get => Place1; set { Place1 = value; PlaceNoNumerics = FixNumerics(value ?? string.Empty, false); } }
+    public string Address { get; private set; }
+    public string Place { get; private set; }
     public string CountryMetaphone => DoubleMetaphone.GetPrimaryMetaphone(Country);
     public string RegionMetaphone => DoubleMetaphone.GetPrimaryMetaphone(Region);
     public string SubRegionMetaphone => DoubleMetaphone.GetPrimaryMetaphone(SubRegion);
     public string AddressMetaphone => DoubleMetaphone.GetPrimaryMetaphone(Address);
     public string PlaceMetaphone => DoubleMetaphone.GetPrimaryMetaphone(Place);
-    public string AddressNoNumerics { get; private set; }
-    public string PlaceNoNumerics { get; private set; }
-    public string FuzzyMatch { get; private set; }
-    public string FuzzyNoParishMatch { get; private set; }
+    public string AddressNoNumerics 
+    { 
+      get
+      {
+        return FixNumerics(Address ?? string.Empty, false);
+      }
+    }
+
+    public string PlaceNoNumerics 
+    {
+      get
+      {
+        return FixNumerics(Place ?? string.Empty, false);
+      }
+    }
+
+    public string FuzzyMatch => $"{AddressMetaphone}:{SubRegionMetaphone}:{RegionMetaphone}:{CountryMetaphone}";
+    public string FuzzyNoParishMatch => $"{AddressMetaphone}:{RegionMetaphone}:{CountryMetaphone}";
     public string ParishID { get; internal set; }
     public int Level { get; private set; }
     public Region KnownRegion { get; private set; }
@@ -58,10 +71,9 @@ namespace FTAnalyzer
     public bool GEDCOMLatLong { get; set; }
     public bool FTAnalyzerCreated { get; set; }
 #if __PC__
-        public GeoResponse.CResult.CGeometry.CViewPort ViewPort { get; set; }
+    public GeoResponse.CResult.CGeometry.CViewPort ViewPort { get; set; }
 #endif
     readonly Dictionary<string, Individual> individuals;
-    readonly string[] _Parts;
 
     static Dictionary<string, string> COUNTRY_TYPOS = new Dictionary<string, string>();
     static Dictionary<string, string> REGION_TYPOS = new Dictionary<string, string>();
@@ -74,16 +86,32 @@ namespace FTAnalyzer
 
     static Dictionary<string, string> COUNTRY_SHIFTS = new Dictionary<string, string>();
     static Dictionary<string, string> CITY_ADD_COUNTRY = new Dictionary<string, string>();
-    public static Dictionary<Geocode, string> Geocodes;
-    public static FactLocation UNKNOWN_LOCATION;
-    public static FactLocation BLANK_LOCATION;
-    public static FactLocation TEMP = new FactLocation();
+
+    public static readonly IDictionary<Geocode, string> Geocodes = new Dictionary<Geocode, string>
+    {
+        { Geocode.UNKNOWN, "Unknown" },
+        { Geocode.NOT_SEARCHED, "Not Searched" },
+        { Geocode.GEDCOM_USER, "GEDCOM/User Data" },
+        { Geocode.PARTIAL_MATCH, "Partial Match (Google)" },
+        { Geocode.MATCHED, "Google Matched" },
+        { Geocode.NO_MATCH, "No Match" },
+        { Geocode.INCORRECT, "Incorrect (User Marked)" },
+        { Geocode.OUT_OF_BOUNDS, "Outside Country Area" },
+        { Geocode.LEVEL_MISMATCH, "Partial Match (Levels)" },
+        { Geocode.OS_50KMATCH, "OS Gazetteer Match" },
+        { Geocode.OS_50KPARTIAL, "Partial Match (Ord Surv)" },
+        { Geocode.OS_50KFUZZY, "Fuzzy Match (Ord Surv)" }
+    };
+
+    public static readonly FactLocation BLANK_LOCATION = new FactLocation("Unknown", "0.0", "0.0", Geocode.GEDCOM_USER);
+    public static readonly FactLocation UNKNOWN_LOCATION = new FactLocation(string.Empty, "0.0", "0.0", Geocode.UNKNOWN);
+    public static readonly FactLocation TEMP = new FactLocation();
+
     #endregion
 
     #region Static Constructor
     static FactLocation()
     {
-      SetupGeocodes();
       ResetLocations();
     }
 
@@ -212,9 +240,6 @@ namespace FTAnalyzer
 
     static void ValidateTypoFixes()
     {
-      //foreach (string typo in COUNTRY_TYPOS.Values)
-      //    if (!Countries.IsKnownCountry(typo))
-      //        Console.WriteLine("Country typo: " + typo + " is not a known country.");
       foreach (string typo in REGION_TYPOS.Values)
         if (!Regions.IsPreferredRegion(typo))
           Console.WriteLine($"Region typo: {typo} is not a preferred region.");
@@ -237,33 +262,33 @@ namespace FTAnalyzer
     {
       progress.Report("");
 #if __PC__
-            LOCAL_GOOGLE_FIXES = new Dictionary<Tuple<int, string>, string>();
-            try
-            {
-                string filename = Path.Combine(MappingSettings.Default.CustomMapPath, "GoogleFixes.xml");
-                if (File.Exists(filename))
-                {
-                    XmlDocument xmlDoc = new XmlDocument() { XmlResolver = null };
-                    string xml = File.ReadAllText(filename);
-                    StringReader sreader = new StringReader(xml);
-                    using (XmlReader reader = XmlReader.Create(sreader, new XmlReaderSettings() { XmlResolver = null }))
-                        xmlDoc.Load(reader);
-                    foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/CountryFixes/CountryFix"))
-                        AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, COUNTRY);
-                    foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/RegionFixes/RegionFix"))
-                        AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, REGION);
-                    foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/SubRegionFixes/SubRegionFix"))
-                        AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, SUBREGION);
-                    foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/MultiLevelFixes/MultiLevelFix"))
-                        AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, UNKNOWN);
-                    progress.Report(string.Format("\nLoaded {0} Google Fixes.", LOCAL_GOOGLE_FIXES.Count));
-                }
-            }
-            catch (Exception e)
-            {
-                LOCAL_GOOGLE_FIXES = new Dictionary<Tuple<int, string>, string>();
-                progress.Report(string.Format("Error processing user defined GoogleFixes.xml file. File will be ignored.\n\nError was : {0}", e.Message));
-            }
+      LOCAL_GOOGLE_FIXES = new Dictionary<Tuple<int, string>, string>();
+      try
+      {
+        string filename = Path.Combine(MappingSettings.Default.CustomMapPath, "GoogleFixes.xml");
+        if (File.Exists(filename))
+        {
+          XmlDocument xmlDoc = new XmlDocument() { XmlResolver = null };
+          string xml = File.ReadAllText(filename);
+          StringReader sreader = new StringReader(xml);
+          using (XmlReader reader = XmlReader.Create(sreader, new XmlReaderSettings() { XmlResolver = null }))
+            xmlDoc.Load(reader);
+          foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/CountryFixes/CountryFix"))
+            AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, COUNTRY);
+          foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/RegionFixes/RegionFix"))
+            AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, REGION);
+          foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/SubRegionFixes/SubRegionFix"))
+            AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, SUBREGION);
+          foreach (XmlNode n in xmlDoc.SelectNodes("GoogleGeocodes/MultiLevelFixes/MultiLevelFix"))
+            AddGoogleFixes(LOCAL_GOOGLE_FIXES, n, UNKNOWN);
+          progress.Report(string.Format("\nLoaded {0} Google Fixes.", LOCAL_GOOGLE_FIXES.Count));
+        }
+      }
+      catch (Exception e)
+      {
+        LOCAL_GOOGLE_FIXES = new Dictionary<Tuple<int, string>, string>();
+        progress.Report(string.Format("Error processing user defined GoogleFixes.xml file. File will be ignored.\n\nError was : {0}", e.Message));
+      }
 #endif
     }
 
@@ -278,52 +303,18 @@ namespace FTAnalyzer
           dictionary.Add(from, to);
       }
     }
-
-    //static string GoogleFixLevel(int level)
-    //{
-    //    switch (level)
-    //    {
-    //        case UNKNOWN: return "MultiLevelFix";
-    //        case COUNTRY: return "CountryFix";
-    //        case REGION: return "RegionFix";
-    //        case SUBREGION: return "SubRegionFix";
-    //        default: return "UNKNOWN";
-    //    }
-    //}
-
-    static void SetupGeocodes()
-    {
-      Geocodes = new Dictionary<Geocode, string>
-            {
-                { Geocode.UNKNOWN, "Unknown" },
-                { Geocode.NOT_SEARCHED, "Not Searched" },
-                { Geocode.GEDCOM_USER, "GEDCOM/User Data" },
-                { Geocode.PARTIAL_MATCH, "Partial Match (Google)" },
-                { Geocode.MATCHED, "Google Matched" },
-                { Geocode.NO_MATCH, "No Match" },
-                { Geocode.INCORRECT, "Incorrect (User Marked)" },
-                { Geocode.OUT_OF_BOUNDS, "Outside Country Area" },
-                { Geocode.LEVEL_MISMATCH, "Partial Match (Levels)" },
-                { Geocode.OS_50KMATCH, "OS Gazetteer Match" },
-                { Geocode.OS_50KPARTIAL, "Partial Match (Ord Surv)" },
-                { Geocode.OS_50KFUZZY, "Fuzzy Match (Ord Surv)" }
-            };
-    }
     #endregion
 
     #region Object Constructors
     FactLocation()
     {
       OriginalText = string.Empty;
-      FixedLocation = string.Empty;
-      SortableLocation = string.Empty;
       Country = string.Empty;
       Region = string.Empty;
       SubRegion = string.Empty;
       Address = string.Empty;
       Place = string.Empty;
       ParishID = null;
-      FuzzyMatch = string.Empty;
       individuals = new Dictionary<string, Individual>();
       Latitude = 0;
       Longitude = 0;
@@ -336,9 +327,8 @@ namespace FTAnalyzer
       FoundResultType = string.Empty;
       FoundLevel = -2;
       FTAnalyzerCreated = true; // override when GEDCOM created.
-      _Parts = new string[] { Country, Region, SubRegion, Address, Place };
 #if __PC__
-            ViewPort = new Mapping.GeoResponse.CResult.CGeometry.CViewPort();
+      ViewPort = new Mapping.GeoResponse.CResult.CGeometry.CViewPort();
 #endif
     }
 
@@ -348,11 +338,11 @@ namespace FTAnalyzer
       Latitude = double.TryParse(latitude, out double temp) ? temp : 0;
       Longitude = double.TryParse(longitude, out temp) ? temp : 0;
 #if __PC__
-            NetTopologySuite.Geometries.Coordinate point = new NetTopologySuite.Geometries.Coordinate(Longitude, Latitude);
-            NetTopologySuite.Geometries.Coordinate mpoint = MapTransforms.TransformCoordinate(point);
+      NetTopologySuite.Geometries.Coordinate point = new NetTopologySuite.Geometries.Coordinate(Longitude, Latitude);
+      NetTopologySuite.Geometries.Coordinate mpoint = MapTransforms.TransformCoordinate(point);
 
-            LongitudeM = mpoint.X;
-            LatitudeM = mpoint.Y;
+      LongitudeM = mpoint.X;
+      LatitudeM = mpoint.Y;
 #endif
       GeocodeStatus = status;
       if (status == Geocode.NOT_SEARCHED && (Latitude != 0 || Longitude != 0))
@@ -373,22 +363,22 @@ namespace FTAnalyzer
 
       // Split into constituent parts
       string[] parts = loc.Split(',');
-      Country = parts[parts.Length-1].Trim();
+      Country = parts[parts.Length - 1].Trim();
       Level = COUNTRY;
 
       if (parts.Length >= 2)
       {
-        Region = parts[parts.Length-2].Trim();
+        Region = parts[parts.Length - 2].Trim();
         Level = REGION;
 
         if (parts.Length >= 3)
         {
-          SubRegion = parts[parts.Length-3].Trim();
+          SubRegion = parts[parts.Length - 3].Trim();
           Level = SUBREGION;
 
           if (parts.Length >= 4)
           {
-            Address = parts[parts.Length-4].Trim();
+            Address = parts[parts.Length - 4].Trim();
             Level = ADDRESS;
 
             if (parts.Length >= 5)
@@ -412,21 +402,16 @@ namespace FTAnalyzer
         FixMultipleSpacesAmpersandsCommas();
         FixUKGBTypos();
         FixCountryTypos();
-        Country = EnhancedTextInfo.ToTitleCase(FixRegionTypos(Country).ToLower());
+        //Country = EnhancedTextInfo.ToTitleCase(FixRegionTypos(Region).ToLower());
         ShiftCountryToRegion();
         Region = FixRegionTypos(Region);
         ShiftRegionToParish();
         FixDoubleLocations();
       }
-      SetFixedLocation();
-      SetSortableLocation();
-      SetMetaphones();
       KnownRegion = Regions.GetRegion(Region);
 
       if (!GeneralSettings.Default.SkipFixingLocations)
         FixCapitalisation();
-
-      _Parts = new string[] { Country, Region, SubRegion, Address, Place };
     }
 
     #endregion
@@ -504,16 +489,16 @@ namespace FTAnalyzer
       loc.FoundLocation = string.Empty;
       loc.FoundLevel = -2;
 #if __PC__
-            loc.ViewPort = new Mapping.GeoResponse.CResult.CGeometry.CViewPort();
-            if (DatabaseHelper.IsLocationInDatabase(loc.ToString()))
-            {   // check whether the location in database is geocoded.
-                FactLocation inDatabase = new FactLocation(loc.ToString());
-                DatabaseHelper.GetLocationDetails(inDatabase);
-                if (!inDatabase.IsGeoCoded(true) || !loc.GecodingMatches(inDatabase))
-                    DatabaseHelper.UpdateGeocode(loc); // only update if existing record wasn't geocoded or doesn't match database contents
-            }
-            else
-                DatabaseHelper.InsertGeocode(loc);
+      loc.ViewPort = new Mapping.GeoResponse.CResult.CGeometry.CViewPort();
+      if (DatabaseHelper.IsLocationInDatabase(loc.ToString()))
+      {   // check whether the location in database is geocoded.
+        FactLocation inDatabase = new FactLocation(loc.ToString());
+        DatabaseHelper.GetLocationDetails(inDatabase);
+        if (!inDatabase.IsGeoCoded(true) || !loc.GecodingMatches(inDatabase))
+          DatabaseHelper.UpdateGeocode(loc); // only update if existing record wasn't geocoded or doesn't match database contents
+      }
+      else
+        DatabaseHelper.InsertGeocode(loc);
 #endif
     }
 
@@ -541,8 +526,6 @@ namespace FTAnalyzer
       LOCAL_GOOGLE_FIXES = new Dictionary<Tuple<int, string>, string>();
 
       // set unknown location as unknown so it doesn't keep hassling to be searched
-      BLANK_LOCATION = new FactLocation(string.Empty, "0.0", "0.0", Geocode.UNKNOWN);
-      UNKNOWN_LOCATION = new FactLocation("Unknown", "0.0", "0.0", Geocode.GEDCOM_USER);
       LOCATIONS.Add("Unknown", UNKNOWN_LOCATION);
       if (!GeneralSettings.Default.SkipFixingLocations)
         LoadConversions(Path.GetDirectoryName(Assembly.GetEntryAssembly()?.Location));
@@ -595,10 +578,10 @@ namespace FTAnalyzer
       to.LatitudeM = from.LatitudeM;
       to.LongitudeM = from.LongitudeM;
 #if __PC__
-            to.ViewPort.NorthEast.Lat = from.ViewPort.NorthEast.Lat;
-            to.ViewPort.NorthEast.Long = from.ViewPort.NorthEast.Long;
-            to.ViewPort.SouthWest.Lat = from.ViewPort.SouthWest.Lat;
-            to.ViewPort.SouthWest.Long = from.ViewPort.SouthWest.Long;
+      to.ViewPort.NorthEast.Lat = from.ViewPort.NorthEast.Lat;
+      to.ViewPort.NorthEast.Long = from.ViewPort.NorthEast.Long;
+      to.ViewPort.SouthWest.Lat = from.ViewPort.SouthWest.Lat;
+      to.ViewPort.SouthWest.Long = from.ViewPort.SouthWest.Long;
 #endif
       to.GeocodeStatus = from.GeocodeStatus;
       to.FoundLocation = from.FoundLocation;
@@ -661,30 +644,20 @@ namespace FTAnalyzer
         Place = char.ToUpper(Place[0]) + Place.Substring(1);
     }
 
-    void FixRegionFullStops() => Region = Region.Replace(".", " ").Trim();
+    private void FixRegionFullStops() => Region = Region.Replace(".", " ").Trim();
 
-    void FixCountryFullStops() => Country = Country.Replace(".", " ").Trim();
+    private void FixCountryFullStops() => Country = Country.Replace(".", " ").Trim();
 
-    void FixMultipleSpacesAmpersandsCommas()
+    private void FixMultipleSpacesAmpersandsCommas()
     {
-      while (Country.IndexOf("  ", StringComparison.Ordinal) != -1)
-        Country = Country.Replace("  ", " ");
-      while (Region.IndexOf("  ", StringComparison.Ordinal) != -1)
-        Region = Region.Replace("  ", " ");
-      while (SubRegion.IndexOf("  ", StringComparison.Ordinal) != -1)
-        SubRegion = SubRegion.Replace("  ", " ");
-      while (Address.IndexOf("  ", StringComparison.Ordinal) != -1)
-        Address = Address.Replace("  ", " ");
-      while (Place.IndexOf("  ", StringComparison.Ordinal) != -1)
-        Place = Place.Replace("  ", " ");
-      Country = Country.Replace("&", "and").Replace(",", "").Trim();
-      Region = Region.Replace("&", "and").Replace(",", "").Trim();
-      SubRegion = SubRegion.Replace("&", "and").Replace(",", "").Trim();
-      Address = Address.Replace("&", "and").Replace(",", "").Trim();
-      Place = Place.Replace("&", "and").Replace(",", "").Trim();
+      Country = Country.Replace("  ", " ").Replace("&", "and").Replace(",", "").Trim();
+      Region = Region.Replace("  ", " ").Replace("&", "and").Replace(",", "").Trim();
+      SubRegion = SubRegion.Replace("  ", " ").Replace("&", "and").Replace(",", "").Trim();
+      Address = Address.Replace("  ", " ").Replace("&", "and").Replace(",", "").Trim();
+      Place = Place.Replace("  ", " ").Replace("&", "and").Replace(",", "").Trim();
     }
 
-    void FixUKGBTypos()
+    private void FixUKGBTypos()
     {
       if (Country == "UK" || Country == "GB")
       {
@@ -699,43 +672,45 @@ namespace FTAnalyzer
       }
     }
 
-    void FixCountryTypos()
+    private string LookupInDictionary(string place, IDictionary<string,string> typoMap)
     {
-      COUNTRY_TYPOS.TryGetValue(Country, out string result);
-      if (!string.IsNullOrEmpty(result))
-        Country = result;
-      else
+      string result = string.Empty;
+      if (typoMap.ContainsKey(place))
+        result = typoMap[place];
+
+      if (string.IsNullOrEmpty(result))
       {
-        string fixCase = EnhancedTextInfo.ToTitleCase(Country.ToLower());
-        COUNTRY_TYPOS.TryGetValue(fixCase, out result);
-        if (!string.IsNullOrEmpty(result))
-          Country = result;
+        // Couldn't find, so try again in title case
+        string fixCase = EnhancedTextInfo.ToTitleCase(place.ToLower());
+        if (typoMap.ContainsKey(fixCase))
+          result = typoMap[fixCase];
       }
+
+      return result;
     }
 
-    string FixRegionTypos(string toFix)
+    private void FixCountryTypos()
+    {
+      string result = LookupInDictionary(Country, COUNTRY_TYPOS);
+      if (!string.IsNullOrEmpty(result))
+        Country = result;
+    }
+
+    private string FixRegionTypos(string toFix)
     {
       if (Country == Countries.AUSTRALIA && toFix.Equals("WA"))
         return "Western Australia"; // fix for WA = Washington
-      REGION_TYPOS.TryGetValue(toFix, out string result);
-      if (!string.IsNullOrEmpty(result))
-        return result;
-      string fixCase = EnhancedTextInfo.ToTitleCase(toFix.ToLower());
-      REGION_TYPOS.TryGetValue(fixCase, out result);
+
+      string result = LookupInDictionary(toFix, REGION_TYPOS);
       return !string.IsNullOrEmpty(result) ? result : toFix;
     }
 
-    void ShiftCountryToRegion()
+    private void ShiftCountryToRegion()
     {
-      COUNTRY_SHIFTS.TryGetValue(Country, out string result);
-      if (string.IsNullOrEmpty(result))
-      {
-        string fixCase = EnhancedTextInfo.ToTitleCase(Country.ToLower());
-        COUNTRY_SHIFTS.TryGetValue(fixCase, out result);
-      }
+      string result = LookupInDictionary(Country, COUNTRY_SHIFTS);
       if (!string.IsNullOrEmpty(result))
       {
-        Place = (Place + " " + Address).Trim();
+        Place = $"{Place} {Address}";
         Address = SubRegion;
         SubRegion = Region;
         Region = Country;
@@ -744,19 +719,15 @@ namespace FTAnalyzer
       }
     }
 
-    void ShiftRegionToParish()
+    private void ShiftRegionToParish()
     {
       if (!Countries.IsUnitedKingdom(Country))
         return; // don't shift regions if not UK
-      REGION_SHIFTS.TryGetValue(Region, out string result);
-      if (string.IsNullOrEmpty(result))
-      {
-        string fixCase = EnhancedTextInfo.ToTitleCase(Region.ToLower());
-        REGION_TYPOS.TryGetValue(fixCase, out result);
-      }
+
+      string result = LookupInDictionary(Region, REGION_SHIFTS);
       if (!string.IsNullOrEmpty(result))
       {
-        Place = (Place + " " + Address).Trim();
+        Place = $"{Place} {Address}";
         Address = SubRegion;
         SubRegion = Region;
         Region = result;
@@ -781,60 +752,6 @@ namespace FTAnalyzer
       }
     }
 
-    void SetFixedLocation()
-    {
-      FixedLocation = Country;
-      if (Region.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
-        FixedLocation = Region + ", " + FixedLocation;
-      if (SubRegion.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
-        FixedLocation = SubRegion + ", " + FixedLocation;
-      if (Address.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
-        FixedLocation = Address + ", " + FixedLocation;
-      if (Place.Length > 0)
-        FixedLocation = Place + ", " + FixedLocation;
-      FixedLocation = TrimLeadingCommas(FixedLocation);
-    }
-
-    void SetSortableLocation()
-    {
-      SortableLocation = Country;
-      if (Region.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
-        SortableLocation = $"{SortableLocation}, {Region}";
-      if (SubRegion.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
-        SortableLocation = $"{SortableLocation}, {SubRegion}";
-      if (Address.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
-        SortableLocation = $"{SortableLocation}, {Address}";
-      if (Place.Length > 0)
-        SortableLocation = $"{SortableLocation}, {Place}";
-      SortableLocation = TrimLeadingCommas(SortableLocation);
-    }
-
-    void SetMetaphones()
-    {
-      FuzzyMatch = $"{AddressMetaphone}:{SubRegionMetaphone}:{RegionMetaphone}:{CountryMetaphone}";
-      FuzzyNoParishMatch = $"{AddressMetaphone}:{RegionMetaphone}:{CountryMetaphone}";
-    }
-
-    public static string ReplaceString(string str, string oldValue, string newValue, StringComparison comparison)
-    {
-      StringBuilder sb = new StringBuilder();
-
-      int previousIndex = 0;
-      int index = str.IndexOf(oldValue, comparison);
-      while (index != -1)
-      {
-        sb.Append(str.Substring(previousIndex, index - previousIndex));
-        sb.Append(newValue);
-        index += oldValue.Length;
-
-        previousIndex = index;
-        index = str.IndexOf(oldValue, index, comparison);
-      }
-      sb.Append(str.Substring(previousIndex));
-
-      return sb.ToString();
-    }
-
     public string GoogleFixed
     {
       get
@@ -844,7 +761,7 @@ namespace FTAnalyzer
         foreach (KeyValuePair<Tuple<int, string>, string> fix in LOCAL_GOOGLE_FIXES)
         {
           if (fix.Key.Item1 == UNKNOWN)
-            result = ReplaceString(result, fix.Key.Item2, fix.Value, StringComparison.OrdinalIgnoreCase);
+            result = result.Replace(fix.Key.Item2, fix.Value, StringComparison.OrdinalIgnoreCase);
         }
         if (result != FixedLocation)
           return result;
@@ -852,7 +769,7 @@ namespace FTAnalyzer
         foreach (KeyValuePair<Tuple<int, string>, string> fix in GOOGLE_FIXES)
         {
           if (fix.Key.Item1 == UNKNOWN)
-            result = ReplaceString(result, fix.Key.Item2, fix.Value, StringComparison.OrdinalIgnoreCase);
+            result = result.Replace(fix.Key.Item2, fix.Value, StringComparison.OrdinalIgnoreCase);
         }
         if (result != FixedLocation)
           return result;
@@ -902,10 +819,10 @@ namespace FTAnalyzer
     #endregion
     #region Properties
 
-    public string[] GetParts() => (string[])_Parts.Clone();
+    public string[] GetParts() => new string[] { Country, Region, SubRegion, Address, Place };
 
 #if __PC__
-        public System.Drawing.Image Icon => FactLocationImage.ErrorIcon(GeocodeStatus).Icon;
+    public System.Drawing.Image Icon => FactLocationImage.ErrorIcon(GeocodeStatus).Icon;
 #endif
 
     public string AddressNumeric => FixNumerics(Address, true);
@@ -964,18 +881,18 @@ namespace FTAnalyzer
       {
         float zoom = (Level + 3.75f) * 2.2f;  // default use level 
 #if __PC__
-                if (ViewPort != null)
-                {
-                    double pixelWidth = System.Windows.Forms.Screen.PrimaryScreen.Bounds.Width;  // tweak to get best results as required 
-                    double GLOBE_WIDTH = 512; // a constant in Google's map projection
-                    var west = ViewPort.SouthWest.Long/100000;
-                    var east = ViewPort.NorthEast.Long/100000;
-                    var angle = east - west;
-                    if (angle < 0)
-                        angle += 360;
-                    if (west != 0 || east != 0)
-                        return (int)Math.Abs(Math.Round(Math.Log(pixelWidth * 360f / angle / GLOBE_WIDTH) / Math.Log(2)));
-                }
+        if (ViewPort != null)
+        {
+          double pixelWidth = System.Windows.Forms.Screen.PrimaryScreen.Bounds.Width;  // tweak to get best results as required 
+          double GLOBE_WIDTH = 512; // a constant in Google's map projection
+          var west = ViewPort.SouthWest.Long / 100000;
+          var east = ViewPort.NorthEast.Long / 100000;
+          var angle = east - west;
+          if (angle < 0)
+            angle += 360;
+          if (west != 0 || east != 0)
+            return (int)Math.Abs(Math.Round(Math.Log(pixelWidth * 360f / angle / GLOBE_WIDTH) / Math.Log(2)));
+        }
 #endif
         return zoom;
       }
@@ -987,14 +904,45 @@ namespace FTAnalyzer
     public bool NeedsReverseGeocoding => FoundLocation.Length == 0 &&
                 (GeocodeStatus == Geocode.GEDCOM_USER || GeocodeStatus == Geocode.OS_50KMATCH || GeocodeStatus == Geocode.OS_50KPARTIAL || GeocodeStatus == Geocode.OS_50KFUZZY);
 
-    public string FixedLocation { get; set; }
-    public string Address1 { get; set; }
-    public string Place1 { get; set; }
+    public string FixedLocation
+    {
+      get
+      {
+        string fixedLocation = Country;
+        if (Region.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
+          fixedLocation = $"{Region}, {fixedLocation}";
+        if (SubRegion.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
+          fixedLocation = $"{SubRegion}, {fixedLocation}";
+        if (Address.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
+          fixedLocation = $"{Address}, {fixedLocation}";
+        if (Place.Length > 0)
+          fixedLocation = $"{Place}, {fixedLocation}";
+        return TrimLeadingCommas(fixedLocation);
+      }
+    }
+
+    public string SortableLocation
+    {
+      get
+      {
+        string sortableLocation = Country;
+        if (Region.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
+          sortableLocation = $"{sortableLocation}, {Region}";
+        if (SubRegion.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
+          sortableLocation = $"{sortableLocation}, {SubRegion}";
+        if (Address.Length > 0 || GeneralSettings.Default.AllowEmptyLocations)
+          sortableLocation = $"{sortableLocation}, {Address}";
+        if (Place.Length > 0)
+          sortableLocation = $"{sortableLocation}, {Place}";
+        return TrimLeadingCommas(sortableLocation);
+      }
+    }
+
     #endregion
 
     #region General Functions
-    public FactLocation GetLocation(int level) => GetLocation(level, false);
-    public FactLocation GetLocation(int level, bool fixNumerics)
+
+    public FactLocation GetLocation(int level)
     {
       StringBuilder location = new StringBuilder(Country);
       if (level > COUNTRY && (Region.Length > 0 || GeneralSettings.Default.AllowEmptyLocations))
@@ -1002,9 +950,9 @@ namespace FTAnalyzer
       if (level > REGION && (SubRegion.Length > 0 || GeneralSettings.Default.AllowEmptyLocations))
         location.Insert(0, SubRegion + ", ");
       if (level > SUBREGION && (Address.Length > 0 || GeneralSettings.Default.AllowEmptyLocations))
-        location.Insert(0, fixNumerics ? AddressNumeric : Address + ", ");
+        location.Insert(0, $"{Address}, ");
       if (level > ADDRESS && Place.Length > 0)
-        location.Insert(0, fixNumerics ? PlaceNumeric : Place + ", ");
+        location.Insert(0, $"{Place}, ");
       FactLocation newLocation = GetLocation(location.ToString());
       return newLocation;
     }
@@ -1052,7 +1000,7 @@ namespace FTAnalyzer
     string FixNumerics(string addressField, bool returnNumber)
     {
       int pos = addressField.IndexOf(" ", StringComparison.Ordinal);
-      if (pos > 0 & pos < addressField.Length)
+      if (pos > 0 && pos < addressField.Length)
       {
         string number = addressField.Substring(0, pos);
         string name = addressField.Substring(pos + 1);
@@ -1094,44 +1042,24 @@ namespace FTAnalyzer
       {
         string result = string.Empty;
 #if __PC__
-                if (ViewPort != null)
-                {
-                    if (EmptyViewPort)
-                        DatabaseHelper.GetLocationDetails(this);
-                    if (!EmptyViewPort)
-                    {
-                        GeoResponse.CResult.CGeometry.CViewPort latLongViewPort = MapTransforms.ReverseTransformViewport(ViewPort);
-                        result = $"&bounds={latLongViewPort.NorthEast.Lat},{latLongViewPort.NorthEast.Long}|{latLongViewPort.SouthWest.Lat},{latLongViewPort.SouthWest.Long}";
-                    }
-                }
+        if (ViewPort != null)
+        {
+          if (EmptyViewPort)
+            DatabaseHelper.GetLocationDetails(this);
+          if (!EmptyViewPort)
+          {
+            GeoResponse.CResult.CGeometry.CViewPort latLongViewPort = MapTransforms.ReverseTransformViewport(ViewPort);
+            result = $"&bounds={latLongViewPort.NorthEast.Lat},{latLongViewPort.NorthEast.Long}|{latLongViewPort.SouthWest.Lat},{latLongViewPort.SouthWest.Long}";
+          }
+        }
 #endif
         return result;
       }
     }
 
 #if __PC__
-        public bool EmptyViewPort => ViewPort.NorthEast.Lat == 0 && ViewPort.NorthEast.Long == 0 && ViewPort.SouthWest.Lat == 0 && ViewPort.SouthWest.Long == 0;
+    public bool EmptyViewPort => ViewPort.NorthEast.Lat == 0 && ViewPort.NorthEast.Long == 0 && ViewPort.SouthWest.Lat == 0 && ViewPort.SouthWest.Long == 0;
 #endif
-    //public string OSGridMapReference
-    //{
-    //    get
-    //    {
-    //        if (IsWithinUKBounds)
-    //        {
-    //            //var latLong = new LatitudeLongitude(Latitude, Longitude);
-
-    //            //var cartesian = GeoUK.Convert.ToCartesian(new Wgs84(), latLong);
-    //            //var bngCartesian = Transform.Etrs89ToOsgb36(cartesian);
-    //            //var bngEN = GeoUK.Convert.ToEastingNorthing(new Airy1830(), new BritishNationalGrid(), bngCartesian);
-
-    //            //// Convert to Osgb36 coordinates by creating a new object passing  
-    //            //// in the EastingNorthing object to the constructor.
-    //            //var osgb36EN = new Osgb36(bngEN);
-    //            //return osgb36EN.MapReference;
-    //        }
-    //        return string.Empty;
-    //    }
-    //}
 
     #region Overrides
 
@@ -1220,4 +1148,5 @@ namespace FTAnalyzer
     }
     #endregion
   }
+
 }
